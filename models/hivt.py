@@ -26,6 +26,10 @@ from models import LocalEncoder
 from models import MLPDecoder
 from utils import TemporalData
 
+import numpy as np
+import matplotlib.pyplot as plt
+from argoverse.map_representation.map_api import ArgoverseMap
+from Bezier import Bezier
 
 class HiVT(pl.LightningModule):
 
@@ -57,6 +61,7 @@ class HiVT(pl.LightningModule):
         self.lr = lr
         self.weight_decay = weight_decay
         self.T_max = T_max
+        self.step = 0
 
         self.local_encoder = LocalEncoder(historical_steps=historical_steps,
                                           node_dim=node_dim,
@@ -112,6 +117,12 @@ class HiVT(pl.LightningModule):
         reg_mask = ~data['padding_mask'][:, self.historical_steps:]
         valid_steps = reg_mask.sum(dim=-1)
         cls_mask = valid_steps > 0
+        t = np.arange(0,0.96,0.033)
+        print(data.y.shape)
+        for index in range(data.y.size(dim=0)):
+            y_samples = data.y[index, [0,5,10,15,20,25,29],:].numpy()
+            curve = torch.tensor(Bezier.Curve(t,y_samples), dtype=data.y.dtype)
+            data.y[index,:,:] = curve
         l2_norm = (torch.norm(y_hat[:, :, :, : 2] - data.y, p=2, dim=-1) * reg_mask).sum(dim=-1)  # [F, N]
         best_mode = l2_norm.argmin(dim=0)
         y_hat_best = y_hat[best_mode, torch.arange(data.num_nodes)]
@@ -133,6 +144,108 @@ class HiVT(pl.LightningModule):
 
         y_hat_agent = y_hat[:, data['agent_index'], :, : 2]
         y_agent = data.y[data['agent_index']]
+        '''visualization'''
+        for scenario in range (y_agent.size(dim=0)):
+            # print(f"scenario #{scenario} | agent #{data['agent_index'][scenario]}'s pi : {pi[data['agent_index'][scenario],:]}")
+            # print(f"scenario #{scenario} | agent #{data['agent_index'][scenario]}'s uncertainty : {y_hat[:, data['agent_index'][scenario],0,2:]}")
+            self.step += 1
+            rotate_mat_agent = torch.empty(y_hat_agent.size(dim=0), 2, 2, device=self.device)
+            sin_vals = torch.sin(data['rotate_angles'][data['agent_index'][scenario]])
+            cos_vals = torch.cos(data['rotate_angles'][data['agent_index'][scenario]])
+            rotate_mat_agent[:, 0, 0] = cos_vals
+            rotate_mat_agent[:, 0, 1] = sin_vals
+            rotate_mat_agent[:, 1, 0] = -sin_vals
+            rotate_mat_agent[:, 1, 1] = cos_vals
+            y_agent_offset = torch.matmul(y_agent[scenario].clone().detach(),torch.tensor([[cos_vals, sin_vals], [-sin_vals, cos_vals]]))
+            offset = y_agent_offset - data['positions'][data['agent_index'][scenario],20:,:] 
+            y_hat_agent_original = torch.bmm(y_hat_agent[:, scenario, :, : 2].clone().detach(),rotate_mat_agent) - offset
+            origin = data['origin'][scenario].numpy()
+            theta = data['theta'][scenario]
+            rotate_mat = torch.tensor([[torch.cos(theta), torch.sin(theta)],
+                                    [-torch.sin(theta), torch.cos(theta)]])
+            avm = ArgoverseMap()
+            city_name = data['city'][scenario]
+            seq_lane_props = avm.city_lane_centerlines_dict[city_name]
+            mask = torch.tensor(data['batch'] == scenario, dtype=torch.bool)
+            positions_masked = data['positions'][mask]
+            positions = torch.matmul(positions_masked, rotate_mat).numpy() + origin
+            y_agent_original = torch.matmul(data['positions'][data['agent_index'][scenario],20:,:], rotate_mat).numpy() + origin
+            y_agent_past = torch.matmul(data['positions'][data['agent_index'][scenario],:20,:], rotate_mat).numpy() + origin
+            x = positions[:,:,0]
+            y = positions[:,:,1]
+            x_min = np.min(x)
+            y_min = np.min(y)
+            x_max = np.max(x)
+            y_max = np.max(y)
+            lane_centerlines = []
+            for lane_id, lane_props in seq_lane_props.items():
+
+                lane_cl = lane_props.centerline
+
+                if (
+                    np.min(lane_cl[:, 0]) < x_max
+                    and np.min(lane_cl[:, 1]) < y_max
+                    and np.max(lane_cl[:, 0]) > x_min
+                    and np.max(lane_cl[:, 1]) > y_min
+                ):
+                    lane_centerlines.append(lane_cl)
+            # for time in range (50):    
+            plt.xlim(x_min, x_max)
+            plt.ylim(y_min, y_max) 
+            for lane_cl in lane_centerlines:
+                plt.plot(
+                    lane_cl[:, 0],
+                    lane_cl[:, 1],
+                    "--",
+                    color="grey",
+                    alpha=1,
+                    linewidth=1,
+                    zorder=0,
+                )       
+            cur_time = 19
+            for actor in range(positions_masked.size(dim=0)):
+                if actor == data['agent_index'][scenario] - data['av_index'][scenario] and not torch.equal(positions_masked[actor, cur_time, :],torch.tensor([0,0], dtype=torch.float)):
+                    plt.scatter(x[actor, cur_time], y[actor, cur_time], s=50, color='r')  # agent
+                elif not torch.equal(positions_masked[actor, cur_time, :],torch.tensor([0,0], dtype=torch.float)):
+                    plt.scatter(x[actor, cur_time], y[actor, cur_time], s=10)
+                elif actor == 0:
+                    plt.scatter(x[actor, cur_time], y[actor, cur_time], s=50, color='g') # AV
+            # for time in range(29):
+            for num in range(y_hat_agent_original.size(dim=0)):
+                y_hat_agent_plot = torch.matmul(y_hat_agent_original[num,:,:], rotate_mat) + origin
+                # for time in range(29):
+                plt.plot(y_hat_agent_plot[:,0].numpy(), y_hat_agent_plot[:,1].numpy(),"--", color="r", alpha=1, linewidth=0.5, zorder=0,)
+            plt.plot(y_agent_original[:,0], y_agent_original[:,1],"--", color="g", alpha=1, linewidth=1, zorder=0,)
+            plt.plot(y_agent_past[:,0], y_agent_past[:,1],"-", color="gold", alpha=1, linewidth=1, zorder=0,)
+            plt.axis('off')
+            print(torch.norm(y_hat_agent[:, scenario, -1] - y_agent[scenario, -1], p=2, dim=-1) < 2.0)
+            if torch.any(torch.norm(y_hat_agent[:, scenario, -1] - y_agent[scenario, -1], p=2, dim=-1) < 2.0):
+                plt.savefig(
+                    f"C:/Users/8854373/Desktop/HiVT/val image/HiVT_128/{self.step}.png",
+                    bbox_inches="tight",
+                    pad_inches=0,
+                )  
+            else:
+                plt.savefig(
+                    f"C:/Users/8854373/Desktop/HiVT/val image/HiVT_128/miss{self.step}.png",
+                    bbox_inches="tight",
+                    pad_inches=0,
+                )  
+            print(f"{self.step} complete!")
+            plt.close()
+            # from moviepy.editor import ImageSequenceClip
+            # import cv2
+            # import os
+            # list_video = [f"{x}.png" for x in range(50)]
+            # for time in range(50):
+            #     img = cv2.imread(f'{time}.png')
+            #     img = cv2.resize(img, dsize=(540,390))
+            #     cv2.imwrite(f'{time}.png', img)
+            # clip = ImageSequenceClip(list_video, fps=2)
+            # clip.write_videofile(f"{1}.mp4")
+            # for time in range(50):
+            #     os.remove(f'{time}.png')
+        '''visualization'''
         fde_agent = torch.norm(y_hat_agent[:, :, -1] - y_agent[:, -1], p=2, dim=-1)
         best_mode_agent = fde_agent.argmin(dim=0)
         y_hat_best_agent = y_hat_agent[best_mode_agent, torch.arange(data.num_graphs)]

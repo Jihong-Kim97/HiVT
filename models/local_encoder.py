@@ -42,7 +42,7 @@ class LocalEncoder(nn.Module):
                  num_heads: int = 8,
                  dropout: float = 0.1,
                  num_temporal_layers: int = 4,
-                 local_radius: float = 50,
+                 local_radius: float =88,
                  parallel: bool = False) -> None:
         super(LocalEncoder, self).__init__()
         self.historical_steps = historical_steps
@@ -70,12 +70,15 @@ class LocalEncoder(nn.Module):
     def forward(self, data: TemporalData) -> torch.Tensor:
         for t in range(self.historical_steps):
             data[f'edge_index_{t}'], _ = subgraph(subset=~data['padding_mask'][:, t], edge_index=data.edge_index)
+            # print(data[f'edge_index_{t}'])
+            heading_vector = data['positions'][:,t+1] - data['positions'][:,t]
+            data[f'heading_angle_{t}'] = torch.atan2(heading_vector[:,1], heading_vector[:,0]) # modified
             data[f'edge_attr_{t}'] = \
                 data['positions'][data[f'edge_index_{t}'][0], t] - data['positions'][data[f'edge_index_{t}'][1], t]
         if self.parallel:
             snapshots = [None] * self.historical_steps
             for t in range(self.historical_steps):
-                edge_index, edge_attr = self.drop_edge(data[f'edge_index_{t}'], data[f'edge_attr_{t}'])
+                edge_index, edge_attr = self.drop_edge(data[f'edge_index_{t}'], data[f'edge_attr_{t}'], data[f'heading_angle_{t}']) # modified
                 snapshots[t] = Data(x=data.x[:, t], edge_index=edge_index, edge_attr=edge_attr,
                                     num_nodes=data.num_nodes)
             batch = Batch.from_data_list(snapshots)
@@ -85,12 +88,12 @@ class LocalEncoder(nn.Module):
         else:
             out = [None] * self.historical_steps
             for t in range(self.historical_steps):
-                edge_index, edge_attr = self.drop_edge(data[f'edge_index_{t}'], data[f'edge_attr_{t}'])
+                edge_index, edge_attr = self.drop_edge(data[f'edge_index_{t}'], data[f'edge_attr_{t}'], data[f'heading_angle_{t}']) # modified
                 out[t] = self.aa_encoder(x=data.x[:, t], t=t, edge_index=edge_index, edge_attr=edge_attr,
                                          bos_mask=data['bos_mask'][:, t], rotate_mat=data['rotate_mat'])
             out = torch.stack(out)  # [T, N, D]
         out = self.temporal_encoder(x=out, padding_mask=data['padding_mask'][:, : self.historical_steps])
-        edge_index, edge_attr = self.drop_edge(data['lane_actor_index'], data['lane_actor_vectors'])
+        edge_index, edge_attr = self.drop_edge(data['lane_actor_index'], data['lane_actor_vectors'], data[f'heading_angle_{t}']) # modified
         out = self.al_encoder(x=(data['lane_vectors'], out), edge_index=edge_index, edge_attr=edge_attr,
                               is_intersections=data['is_intersections'], turn_directions=data['turn_directions'],
                               traffic_controls=data['traffic_controls'], rotate_mat=data['rotate_mat'])

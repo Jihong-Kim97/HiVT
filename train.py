@@ -23,7 +23,7 @@ if __name__ == '__main__':
     pl.seed_everything(2022)
 
     parser = ArgumentParser()
-    parser.add_argument('--root', type=str, required=True)
+    parser.add_argument('--root', type=str, default='D:/다운로드/Argoverse1.1')
     parser.add_argument('--train_batch_size', type=int, default=32)
     parser.add_argument('--val_batch_size', type=int, default=32)
     parser.add_argument('--shuffle', type=bool, default=True)

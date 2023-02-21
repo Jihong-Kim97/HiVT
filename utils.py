@@ -65,11 +65,18 @@ class DistanceDropEdge(object):
 
     def __call__(self,
                  edge_index: torch.Tensor,
-                 edge_attr: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+                 edge_attr: torch.Tensor,
+                 heading_angle: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor]: # modified
         if self.max_distance is None:
             return edge_index, edge_attr
         row, col = edge_index
-        mask = torch.norm(edge_attr, p=2, dim=-1) < self.max_distance
+        # mask = torch.norm(edge_attr, p=2, dim=-1) < self.max_distance
+        vector_angle = torch.atan2(edge_attr[:,1], edge_attr[:,0])
+        if heading_angle is None:
+            mask = torch.norm(edge_attr, p=2, dim=-1) < self.max_distance
+        else:
+            angle_diff = vector_angle - heading_angle[edge_index[1,:]]
+            mask = torch.logical_and(torch.abs(torch.norm(edge_attr, p=2, dim=-1) * torch.sin(angle_diff)) < self.max_distance/2,torch.abs(torch.norm(edge_attr, p=2, dim=-1) * torch.cos(angle_diff) + self.max_distance/4) < self.max_distance/2)
         edge_index = torch.stack([row[mask], col[mask]], dim=0)
         edge_attr = edge_attr[mask]
         return edge_index, edge_attr
